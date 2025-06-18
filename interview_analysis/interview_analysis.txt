@@ -1,0 +1,137 @@
+## Piles Game Solution
+
+Here's a structured approach to solving the "Piles Game" problem, addressing the candidate's evaluation criteria.
+
+**1. Questions to the Interviewer:**
+
+*   Can you clarify the "optimally" condition for both players? Does it mean they always choose the move that maximizes their chances of winning, or is there a specific strategy they should follow?
+*   Are there any constraints on the input size (number of piles and maximum number of stones in a pile)? This helps in choosing the most efficient algorithm.
+*   What is the expected behavior for edge cases, such as an empty pile list, a pile with zero stones, or k=0?
+*   Can `k` be greater than any of the pile sizes? If so, how should the removal be handled?
+
+
+**2. Pseudocode and Reasoning:**
+
+The game can be solved using a recursive approach with memoization (dynamic programming).  The core idea is to model the game as a state where we represent piles of stones with an array.  The current player will make a move and the new state will be evaluated recursively.  To avoid recomputation, we'll store the results in a map.
+
+*   **Base Cases:**
+    *   If all piles are empty, the current player loses (the previous player won).
+    *   If it is the last turn and it's possible to take all stones from any pile, current player wins.
+
+*   **Recursive Step:**
+    *   For each pile:
+        *   Try to remove `k` multiple stones if possible; recursively check for the win/lose state
+        *   If fewer than `k` stones are present, try to remove any possible number of stones (from 1 to the number of stones present); recursively check for the win/lose state.
+    *   If any of the recursive calls return "win" (for the current player), then the current player wins. Otherwise, the current player loses.
+
+*   **Memoization:**  Use a `HashMap` (or equivalent data structure) to store the results of subproblems. The key will be a tuple representing the pile state and the current player. The value will be a boolean indicating whether the player can win from that state.
+
+
+**3. C++14 Solution:**
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <string>
+#include <map>
+
+using namespace std;
+
+// Memoization table to store results of subproblems
+map<pair<vector<int>, bool>, bool> memo;
+
+bool canWin(vector<int> piles, int k, bool samTurn) {
+    // Base case: If all piles are empty, the current player loses.
+    bool allEmpty = true;
+    for (int pile : piles) {
+        if (pile > 0) {
+            allEmpty = false;
+            break;
+        }
+    }
+    if (allEmpty) return false; // Current player loses
+
+    //Check memoization table
+    if (memo.count({piles, samTurn})) {
+        return memo[{piles, samTurn}];
+    }
+
+    bool canWinGame = false;
+    for (int i = 0; i < piles.size(); ++i) {
+        // Try removing k multiples of stones.
+        if (piles[i] >= k) {
+            vector<int> nextPiles = piles;
+            nextPiles[i] -= k;
+            if (!canWin(nextPiles, k, !samTurn)) { //if the next player loses, current player wins
+                canWinGame = true;
+                break;
+            }
+        }
+        // Try removing any number of stones if less than k stones are present.
+        for (int j = 1; j <= piles[i]; ++j) {
+            vector<int> nextPiles = piles;
+            nextPiles[i] -= j;
+            if (!canWin(nextPiles, k, !samTurn)) { //if the next player loses, current player wins
+                canWinGame = true;
+                break;
+            }
+        }
+        if(canWinGame){
+            break;
+        }
+    }
+
+    //Store result in memo table
+    memo[{piles, samTurn}] = canWinGame;
+    return canWinGame;
+}
+
+
+string gameOfPiles(vector<int> piles, int k) {
+    bool samWins = canWin(piles, k, true);
+    string winner = samWins ? "Sam" : "Alex";
+    return winner + " wins the game of " + to_string(piles.size()) + " pile(s).";
+}
+
+int main() {
+    vector<int> piles = {3, 5, 7};
+    int k = 2;
+    cout << gameOfPiles(piles, k) << endl; 
+    return 0;
+}
+```
+
+**4. Complexity Analysis:**
+
+*   **Time Complexity:** O(n * m^p), where n is the number of piles, m is the maximum number of stones in any pile, and p is the number of piles. The recursive approach explores a search space of this size.  Memoization significantly reduces this complexity by storing the results of subproblems.  In the worst case, without memoization, the complexity could be exponential. With Memoization the complexity becomes polynomial, because each state is visited only once.
+*   **Space Complexity:** O(n*m) due to the memoization table, which stores results for each pile state.  In addition, the recursive calls will use stack space, which will be proportional to the depth of the recursion.
+
+
+**5. Trade-offs:**
+
+The recursive approach with memoization provides a clear and concise solution.  An iterative approach using dynamic programming is possible but might be more complex to implement and less readable.
+
+**6. Alternative Approaches:**
+
+While the recursive approach with memoization is efficient and clear, one could explore an iterative dynamic programming approach.  However, this is likely to be less intuitive for a coding interview setting.
+
+**C++ Code for Iterative Dynamic Programming (Alternative):**
+
+```cpp
+#include <iostream>
+#include <vector>
+#include <string>
+
+using namespace std;
+
+string gameOfPilesDP(vector<int> piles, int k) {
+    //Implementation omitted for brevity due to increased complexity compared to recursive approach.  This approach would require a multi-dimensional array or other complex data structure to efficiently store and manage states.
+    return ""; // Replace with actual DP solution
+}
+
+```
+
+
+**7. Why Chosen Solution is Best:**
+
+The recursive solution with memoization strikes a good balance between clarity, efficiency, and ease of implementation for a coding interview.  It's relatively easy to understand and explain, while still having a reasonable time and space complexity thanks to memoization. The iterative dynamic programming solution, while potentially slightly more efficient in some cases, would be significantly more challenging to implement correctly and clearly communicate within the constraints of a typical coding interview.

@@ -1,0 +1,33 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: audio_transcriber.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "audio_transcriber.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: setup_venv.bat",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "setup_venv.bat",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: Streamlit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "obs_frame_capture.py"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
