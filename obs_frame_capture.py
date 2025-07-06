@@ -57,7 +57,33 @@ class ImageUploader:
             print(f"Error uploading image: {str(e)}")
             return None
 
+# Global singleton instances
+_GEMINI_MODEL = None
+_OPENAI_CLIENT = None
+
+# File-based state tracking for API initialization
+def _get_init_state():
+    """Get initialization state from a temporary file"""
+    try:
+        if os.path.exists('.api_init_state'):
+            with open('.api_init_state', 'r') as f:
+                state = f.read().strip().split(',')
+                return state
+        return ['False', 'False', 'False']
+    except Exception as e:
+        return ['False', 'False', 'False']
+
+def _set_init_state(gemini_init, openai_init, models_queried):
+    """Set initialization state to a temporary file"""
+    try:
+        with open('.api_init_state', 'w') as f:
+            state_str = f"{gemini_init},{openai_init},{models_queried}"
+            f.write(state_str)
+    except Exception as e:
+        pass
+
 class OBSCapture:
+    
     def verify_api_key(self):
         """Verify that the API key is loaded and valid"""
         try:
@@ -95,32 +121,70 @@ class OBSCapture:
         self.capture_thread = None
         self.analysis_in_progress = False
         self.test_mode = False
-        self.api_initialized = False
         
-        # Initialize AI client based on flag (only once)
-        if not self.api_initialized:
-            if self.use_gemini:
+        # Get current initialization state
+        gemini_init, openai_init, models_queried = _get_init_state()
+        gemini_initialized = gemini_init == 'True'
+        openai_initialized = openai_init == 'True'
+        
+        # Initialize AI client based on flag (only once per API type)
+        global _GEMINI_MODEL, _OPENAI_CLIENT
+        
+        if self.use_gemini:
+            if not gemini_initialized:
                 # Initialize Gemini
                 gemini_api_key = os.getenv('GEMINI_API_KEY')
                 if not gemini_api_key:
                     raise ValueError("GEMINI_API_KEY environment variable not set")
                 genai.configure(api_key=gemini_api_key)
-                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                print("Initialized Gemini API")
+                model_name = "gemini-2.5-pro"  # Latest model with best coding analysis capabilities
+                _GEMINI_MODEL = genai.GenerativeModel(model_name)
+                self.gemini_model = _GEMINI_MODEL
+                print(f"Initialized Gemini API with model: {model_name}")
+                
+                # Verify API key
+                self.verify_api_key()
+                _set_init_state('True', openai_init, models_queried)
             else:
+                # Reuse existing Gemini model
+                if _GEMINI_MODEL is None:
+                    # Fallback: recreate if global instance is lost
+                    gemini_api_key = os.getenv('GEMINI_API_KEY')
+                    if not gemini_api_key:
+                        raise ValueError("GEMINI_API_KEY environment variable not set")
+                    genai.configure(api_key=gemini_api_key)
+                    model_name = "gemini-2.5-pro"
+                    _GEMINI_MODEL = genai.GenerativeModel(model_name)
+                self.gemini_model = _GEMINI_MODEL
+        else:
+            if not openai_initialized:
                 # Initialize OpenAI
                 api_key = os.getenv('OPENAI_API_KEY')
                 if not api_key:
                     raise ValueError("OPENAI_API_KEY environment variable not set")
-                self.openai_client = OpenAI(
+                _OPENAI_CLIENT = OpenAI(
                     api_key=api_key,
                     base_url="https://api.openai.com/v1"
                 )
+                self.openai_client = _OPENAI_CLIENT
                 print("Initialized OpenAI API")
-            
-            # Verify API key
-            self.verify_api_key()
-            self.api_initialized = True
+                
+                # Verify API key
+                self.verify_api_key()
+                _set_init_state(gemini_init, 'True', models_queried)
+            else:
+                # Reuse existing OpenAI client
+                if _OPENAI_CLIENT is None:
+                    # Fallback: recreate if global instance is lost
+                    api_key = os.getenv('OPENAI_API_KEY')
+                    if not api_key:
+                        raise ValueError("OPENAI_API_KEY environment variable not set")
+                    _OPENAI_CLIENT = OpenAI(
+                        api_key=api_key,
+                        base_url="https://api.openai.com/v1"
+                    )
+                self.openai_client = _OPENAI_CLIENT
+                print("Reusing existing OpenAI API")
         
         # Create output directories if they don't exist
         for directory in [self.output_dir, self.unique_dir, self.analysis_dir, self.test_images_dir]:
@@ -521,7 +585,12 @@ class OBSCapture:
                         if not os.path.exists(frame_path):
                             print(f"Warning: File not found: {frame_path}")
                             continue
+                        
+                        # Use PIL Image for better compatibility with Gemini models
                         image = Image.open(frame_path)
+                        # Convert to RGB if needed
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
                         images.append(image)
                     except Exception as e:
                         print(f"Error loading image {frame_path}: {str(e)}")
@@ -531,8 +600,47 @@ class OBSCapture:
                     print("No valid images to analyze")
                     return
                 
-                # Make Gemini API call
-                response = self.gemini_model.generate_content([prompt, *images])
+                # Make Gemini API call with retry and fallback logic
+                retry_count = 0
+                max_retries = 3
+                response = None
+                
+                while retry_count < max_retries:
+                    try:
+                        response = self.gemini_model.generate_content([prompt, *images])
+                        print(f"Gemini API call successful (attempt {retry_count + 1})")
+                        break
+                    except Exception as e:
+                        print(f"Error making Gemini API call (attempt {retry_count + 1}): {str(e)}")
+                        retry_count += 1
+                        
+                        # If we get a 500 error, try with a more stable model
+                        if "500" in str(e) and retry_count == 1:
+                            print("500 error detected, trying with gemini-1.5-pro as fallback...")
+                            try:
+                                fallback_model = genai.GenerativeModel('gemini-1.5-pro')
+                                response = fallback_model.generate_content([prompt, *images])
+                                print("Fallback model call successful")
+                                break
+                            except Exception as fallback_e:
+                                print(f"Fallback model also failed: {str(fallback_e)}")
+                                # Try with gemini-1.5-flash as final fallback
+                                try:
+                                    print("Trying with gemini-1.5-flash as final fallback...")
+                                    final_fallback = genai.GenerativeModel('gemini-1.5-flash')
+                                    response = final_fallback.generate_content([prompt, *images])
+                                    print("Final fallback model call successful")
+                                    break
+                                except Exception as final_e:
+                                    print(f"Final fallback model also failed: {str(final_e)}")
+                        
+                        if retry_count < max_retries:
+                            time.sleep(2)  # Wait longer between retries
+                
+                if response is None:
+                    print("Failed to make Gemini API call after all retries and fallback attempts")
+                    return
+                
                 analysis = response.text
             else:
                 # Prepare messages for OpenAI
@@ -736,6 +844,44 @@ def get_available_models():
         print(f"Error getting models: {str(e)}")
         return []
 
+def get_available_gemini_models():
+    """Query available Gemini models and print to console (only once)"""
+    # Get current initialization state
+    gemini_init, openai_init, models_queried = _get_init_state()
+    
+    if models_queried == 'True':
+        print("Gemini models already queried, skipping...")
+        return []
+    
+    try:
+        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        if not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable not set")
+        
+        # Configure Gemini
+        genai.configure(api_key=gemini_api_key)
+        
+        # List available models
+        models = genai.list_models()
+        
+        print("\n=== Available Gemini Models ===")
+        # Filter for generative models
+        generative_models = []
+        for model in models:
+            if 'generateContent' in model.supported_generation_methods:
+                generative_models.append(model.name)
+                print(f"- {model.name}")
+        
+        print(f"Total generative models: {len(generative_models)}")
+        print("===============================\n")
+        
+        # Update state to mark models as queried
+        _set_init_state(gemini_init, openai_init, 'True')
+        return generative_models
+    except Exception as e:
+        print(f"Error getting Gemini models: {str(e)}")
+        return []
+
 def run_streamlit():
     """Run the Streamlit interface"""
     st.set_page_config(page_title="Interview Analysis", layout="wide")
@@ -779,6 +925,8 @@ def run_streamlit():
     # Create the capture instance if not exists
     if st.session_state.capture is None:
         st.session_state.capture = OBSCapture(use_gemini=True)
+        # Query available models on first startup
+        get_available_gemini_models()
     else:
         # Clean up any orphaned threads on app restart
         if (st.session_state.capture.capture_thread and 
@@ -793,10 +941,9 @@ def run_streamlit():
         st.header("API Settings")
         use_gemini = st.checkbox("Use Gemini API instead of OpenAI", value=True)
         
-        # Only create new instance if it doesn't exist or if API type actually changed
-        if st.session_state.capture is None:
-            st.session_state.capture = OBSCapture(use_gemini=use_gemini)
-        elif st.session_state.capture.use_gemini != use_gemini:
+        # Only recreate if API type actually changed
+        if (st.session_state.capture and 
+            st.session_state.capture.use_gemini != use_gemini):
             # Only recreate if API type actually changed
             print(f"Switching from {'Gemini' if st.session_state.capture.use_gemini else 'OpenAI'} to {'Gemini' if use_gemini else 'OpenAI'}")
             st.session_state.capture = OBSCapture(use_gemini=use_gemini)

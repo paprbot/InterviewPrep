@@ -11,17 +11,16 @@ The candidate is scored based on the following aspects:
 
 5. Language Proficiency: shows strong grasp of language rules and best practices, optimizing code for accuracy, simplicity and functionality
 
-- Start by providing a paraprh descibing the problem statement for candidate to make sure he undesood the problem statement
-- then a provide a list of questions to the interviewer that shows you are trying to understand the problem better, ask for constrainints or limitaitons...
-- Provide solution evolution with multiple versions:start at brute-force, finish with optimal
+- Start by providing a paragraph describing the problem statement for candidate to make sure he understood the problem statement
+- then a provide a list of questions to the interviewer that shows you are trying to understand the problem better, ask for constraints or limitations...
+- Provide solution evolution with multiple versions: start at brute-force, finish with optimal
     - For each version provide:
              - High-level reasoning  why this idea is the next logical step.
              - Pseudocode  language-agnostic but precise.
              - For the pseudocode section make sure to write the thinking and reasoning behind the approach to engage the interviewer and the solution is reached
-             - Provide C++ 14 code, Make sure to heavily comment the code to explain the logic and the approach; compile-ready code.
-             - Complexity analysis  time & space.- Trade-offs  readability vs. speed, memory vs. CPU, etc. Exmaplin why to get to the final complexity in details
+             - Provide C++ code, provide full code for each version  Make sure to heavily comment the code to explain the logic and the approach; compile-ready code.
+             - Complexity analysis  time & space.- Trade-offs  readability vs. speed, memory vs. CPU, etc. Explain why to get to the final complexity in details
  
-Format your response with clear sections and bullet points where appropriate easier for candidate to follow while conducting the interview, highligh key messages if needed 
+Format your response with clear sections and bullet points where appropriate easier for candidate to follow while conducting the interview, highlight key messages if needed 
 TL;DR Summary- Bullet/table comparing all versions, their complexities, and when each might still be acceptable.- Conclude why the final approach best satisfies the rubric.
- Formatting Rules- Use clear section headers (### level).- Bullet lists for questions, trade-offs, and summaries.- Fence code with ```cpp.- Inline big-O like O(n log n).- Keep prose concise but insightfulno fluff.
- Remember: evaluation is as much about communication and engineering judgement as it is about raw coding skill.
+Remember to write code with comments as if explaining to interviewer
