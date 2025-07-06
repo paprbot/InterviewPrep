@@ -21,6 +21,15 @@ import google.generativeai as genai
 # Load environment variables from .env file
 load_dotenv()
 
+# Check package versions for debugging
+try:
+    import openai
+    import httpx
+    print(f"OpenAI version: {openai.__version__}")
+    print(f"httpx version: {httpx.__version__}")
+except Exception as e:
+    print(f"Error checking versions: {str(e)}")
+
 class ImageUploader:
     def __init__(self):
         self.client_id = os.getenv('IMGUR_CLIENT_ID')
@@ -137,7 +146,7 @@ class OBSCapture:
                 if not gemini_api_key:
                     raise ValueError("GEMINI_API_KEY environment variable not set")
                 genai.configure(api_key=gemini_api_key)
-                model_name = "gemini-2.5-pro"  # Latest model with best coding analysis capabilities
+                model_name = "gemini-1.5-pro"  # Latest model with best coding analysis capabilities
                 _GEMINI_MODEL = genai.GenerativeModel(model_name)
                 self.gemini_model = _GEMINI_MODEL
                 print(f"Initialized Gemini API with model: {model_name}")
@@ -153,7 +162,7 @@ class OBSCapture:
                     if not gemini_api_key:
                         raise ValueError("GEMINI_API_KEY environment variable not set")
                     genai.configure(api_key=gemini_api_key)
-                    model_name = "gemini-2.5-pro"
+                    model_name = "gemini-2.5-flash"
                     _GEMINI_MODEL = genai.GenerativeModel(model_name)
                 self.gemini_model = _GEMINI_MODEL
         else:
@@ -162,16 +171,39 @@ class OBSCapture:
                 api_key = os.getenv('OPENAI_API_KEY')
                 if not api_key:
                     raise ValueError("OPENAI_API_KEY environment variable not set")
-                _OPENAI_CLIENT = OpenAI(
-                    api_key=api_key,
-                    base_url="https://api.openai.com/v1"
-                )
-                self.openai_client = _OPENAI_CLIENT
-                print("Initialized OpenAI API")
-                
-                # Verify API key
-                self.verify_api_key()
-                _set_init_state(gemini_init, 'True', models_queried)
+                try:
+                    print("Creating new OpenAI client...")
+                    print(f"API key length: {len(api_key) if api_key else 0}")
+                    print(f"Environment variables that might affect OpenAI: {[k for k in os.environ.keys() if 'openai' in k.lower() or 'proxy' in k.lower()]}")
+                    
+                    # Check for proxy-related environment variables
+                    proxy_vars = {k: v for k, v in os.environ.items() if 'proxy' in k.lower()}
+                    if proxy_vars:
+                        print(f"Found proxy environment variables: {proxy_vars}")
+                    
+                    # Create a custom httpx client that filters out problematic arguments
+                    import httpx
+                    
+                    # Create httpx client without any proxy-related arguments
+                    http_client = httpx.Client(
+                        timeout=httpx.Timeout(30.0),
+                        follow_redirects=True
+                    )
+                    
+                    _OPENAI_CLIENT = OpenAI(
+                        api_key=api_key,
+                        http_client=http_client
+                    )
+                    self.openai_client = _OPENAI_CLIENT
+                    print("Initialized OpenAI API")
+                    
+                    # Verify API key
+                    self.verify_api_key()
+                    _set_init_state(gemini_init, 'True', models_queried)
+                except Exception as e:
+                    print(f"Error initializing OpenAI client: {str(e)}")
+                    print(f"Error type: {type(e)}")
+                    raise
             else:
                 # Reuse existing OpenAI client
                 if _OPENAI_CLIENT is None:
@@ -179,10 +211,25 @@ class OBSCapture:
                     api_key = os.getenv('OPENAI_API_KEY')
                     if not api_key:
                         raise ValueError("OPENAI_API_KEY environment variable not set")
-                    _OPENAI_CLIENT = OpenAI(
-                        api_key=api_key,
-                        base_url="https://api.openai.com/v1"
-                    )
+                    try:
+                        print("Recreating OpenAI client...")
+                        # Create a custom httpx client that filters out problematic arguments
+                        import httpx
+                        
+                        # Create httpx client without any proxy-related arguments
+                        http_client = httpx.Client(
+                            timeout=httpx.Timeout(30.0),
+                            follow_redirects=True
+                        )
+                        
+                        _OPENAI_CLIENT = OpenAI(
+                            api_key=api_key,
+                            http_client=http_client
+                        )
+                    except Exception as e:
+                        print(f"Error recreating OpenAI client: {str(e)}")
+                        print(f"Error type: {type(e)}")
+                        raise
                 self.openai_client = _OPENAI_CLIENT
                 print("Reusing existing OpenAI API")
         
@@ -422,7 +469,7 @@ class OBSCapture:
         if self.captured_files and not self.analysis_in_progress:
             print("Capture loop exited - triggering analysis automatically")
             self.analysis_in_progress = True
-            self.prepare_gpt4_analysis()
+            self.prepare_ai_analysis()
             self.analysis_in_progress = False
 
     def load_test_images(self, folder_path, max_images=10):
@@ -494,7 +541,7 @@ class OBSCapture:
         if len(self.unique_frames) > 0 and not self.analysis_in_progress:
             print("Triggering analysis for test images...")
             self.analysis_in_progress = True
-            self.prepare_gpt4_analysis()
+            self.prepare_ai_analysis()
             self.analysis_in_progress = False
         
         # Reset loading flag
@@ -546,9 +593,9 @@ class OBSCapture:
             self.analysis_queue.put(error_msg)
             return False
 
-    def prepare_gpt4_analysis(self):
+    def prepare_ai_analysis(self):
         """Send unique frames to AI API for analysis"""
-        print("=== PREPARE_GPT4_ANALYSIS METHOD CALLED ===")
+        print("=== PREPARE_AI_ANALYSIS METHOD CALLED ===")
         if not self.unique_frames:
             print("No unique frames to analyze")
             return
@@ -604,6 +651,7 @@ class OBSCapture:
                 retry_count = 0
                 max_retries = 3
                 response = None
+                actual_model_used = self.gemini_model.model_name  # Track which model was actually used
                 
                 while retry_count < max_retries:
                     try:
@@ -620,6 +668,7 @@ class OBSCapture:
                             try:
                                 fallback_model = genai.GenerativeModel('gemini-1.5-pro')
                                 response = fallback_model.generate_content([prompt, *images])
+                                actual_model_used = fallback_model.model_name  # Update to fallback model
                                 print("Fallback model call successful")
                                 break
                             except Exception as fallback_e:
@@ -629,6 +678,7 @@ class OBSCapture:
                                     print("Trying with gemini-1.5-flash as final fallback...")
                                     final_fallback = genai.GenerativeModel('gemini-1.5-flash')
                                     response = final_fallback.generate_content([prompt, *images])
+                                    actual_model_used = final_fallback.model_name  # Update to final fallback model
                                     print("Final fallback model call successful")
                                     break
                                 except Exception as final_e:
@@ -642,6 +692,8 @@ class OBSCapture:
                     return
                 
                 analysis = response.text
+                # add at the top the model name used
+                analysis = f"Model used: {actual_model_used}\n\n{analysis}"
             else:
                 # Prepare messages for OpenAI
                 messages = [
@@ -655,7 +707,13 @@ class OBSCapture:
                 
                 # Add images to OpenAI request
                 valid_images = 0
-                for frame_path in self.unique_frames:
+                useCapturedFrames = True
+                if useCapturedFrames:
+                    frame_list = self.captured_files
+                else:
+                    frame_list = self.unique_frames
+               
+                for frame_path in frame_list:
                     try:
                         if not os.path.exists(frame_path):
                             print(f"Warning: File not found: {frame_path}")
@@ -685,7 +743,8 @@ class OBSCapture:
                     max_tokens=4096
                 )
                 analysis = response.choices[0].message.content
-            
+                # add at the top the model name used
+                analysis = f"Model used: gpt-4o\n\n{analysis}"
             stop_time = time.time()
             print(f"Time taken: {stop_time - start_time} seconds")
             
@@ -804,7 +863,7 @@ class OBSCapture:
             if not self.analysis_in_progress and self.captured_files:
                 self.analysis_in_progress = True
                 print("Starting GPT-4 analysis from stop_capture method...")
-                self.prepare_gpt4_analysis()
+                self.prepare_ai_analysis()
                 self.analysis_in_progress = False
                 print("Analysis preparation completed")
             else:
