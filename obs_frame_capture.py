@@ -80,8 +80,10 @@ class OBSCapture:
         self.output_dir = "captured_frames"
         self.unique_dir = "unique_frames"
         self.analysis_dir = "interview_analysis"
+        self.test_images_dir = "test_images"  # Directory for test images
         self.fps = 1
         self.running = False
+        self.stop_event = threading.Event()
         self.ws = None
         self.captured_files = []
         self.frame_hashes = {}
@@ -92,32 +94,36 @@ class OBSCapture:
         self.use_gemini = use_gemini
         self.capture_thread = None
         self.analysis_in_progress = False
+        self.test_mode = False
+        self.api_initialized = False
         
-        # Initialize AI client based on flag
-        if self.use_gemini:
-            # Initialize Gemini
-            gemini_api_key = os.getenv('GEMINI_API_KEY')
-            if not gemini_api_key:
-                raise ValueError("GEMINI_API_KEY environment variable not set")
-            genai.configure(api_key=gemini_api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-            print("Initialized Gemini API")
-        else:
-            # Initialize OpenAI
-            api_key = os.getenv('OPENAI_API_KEY')
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY environment variable not set")
-            self.openai_client = OpenAI(
-                api_key=api_key,
-                base_url="https://api.openai.com/v1"
-            )
-            print("Initialized OpenAI API")
-        
-        # Verify API key
-        self.verify_api_key()
+        # Initialize AI client based on flag (only once)
+        if not self.api_initialized:
+            if self.use_gemini:
+                # Initialize Gemini
+                gemini_api_key = os.getenv('GEMINI_API_KEY')
+                if not gemini_api_key:
+                    raise ValueError("GEMINI_API_KEY environment variable not set")
+                genai.configure(api_key=gemini_api_key)
+                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                print("Initialized Gemini API")
+            else:
+                # Initialize OpenAI
+                api_key = os.getenv('OPENAI_API_KEY')
+                if not api_key:
+                    raise ValueError("OPENAI_API_KEY environment variable not set")
+                self.openai_client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.openai.com/v1"
+                )
+                print("Initialized OpenAI API")
+            
+            # Verify API key
+            self.verify_api_key()
+            self.api_initialized = True
         
         # Create output directories if they don't exist
-        for directory in [self.output_dir, self.unique_dir, self.analysis_dir]:
+        for directory in [self.output_dir, self.unique_dir, self.analysis_dir, self.test_images_dir]:
             if not os.path.exists(directory):
                 os.makedirs(directory)
             
@@ -179,36 +185,55 @@ class OBSCapture:
             print("Capture is already running")
             return
             
+        print("Starting capture...")
         self.running = True
-        self.capture_thread = threading.Thread(target=self._capture_loop)
+        self.stop_event.clear()  # Clear the stop event
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True, name="OBS_Capture_Thread")
         self.capture_thread.start()
-        print("Started capture thread")
+        print(f"Started capture thread. Thread alive: {self.capture_thread.is_alive()}")
 
     def _capture_loop(self):
         """Internal capture loop"""
         last_capture_time = 0
         
-        while self.running:
+        while self.running and not self.stop_event.is_set():
             current_time = time.time()
             
             # Check if it's time to capture a new frame (1 FPS)
             if current_time - last_capture_time >= 1.0:
                 try:
+                    # Check if we should still be running
+                    if not self.running or self.stop_event.is_set():
+                        print("Capture stopped during scene detection")
+                        break
+                        
                     # Get the current scene using GetCurrentProgramScene
-                    current_scene = self.ws.call(requests.GetCurrentProgramScene())
-                    print("\nCurrent scene response:", json.dumps(current_scene.datain, indent=2))
-                    
-                    scene_name = current_scene.datain.get('currentProgramSceneName')
-                    
-                    if not scene_name:
-                        print("No active scene found")
+                    try:
+                        current_scene = self.ws.call(requests.GetCurrentProgramScene())
+                        print("\nCurrent scene response:", json.dumps(current_scene.datain, indent=2))
+                        
+                        scene_name = current_scene.datain.get('currentProgramSceneName')
+                        
+                        if not scene_name:
+                            print("No active scene found")
+                            continue
+                        
+                        print(f"Capturing scene: {scene_name}")
+                        
+                        # Check if we should still be running
+                        if not self.running or self.stop_event.is_set():
+                            print("Capture stopped during scene processing")
+                            break
+                        
+                        # Get scene sources
+                        sources = self.ws.call(requests.GetSceneItemList(sceneName=scene_name))
+                        print("Scene sources:", json.dumps(sources.datain, indent=2))
+                    except Exception as e:
+                        print(f"Error in OBS WebSocket call: {str(e)}")
+                        if "disconnect" in str(e).lower() or "connection" in str(e).lower():
+                            print("OBS connection lost - stopping capture")
+                            break
                         continue
-                    
-                    print(f"Capturing scene: {scene_name}")
-                    
-                    # Get scene sources
-                    sources = self.ws.call(requests.GetSceneItemList(sceneName=scene_name))
-                    print("Scene sources:", json.dumps(sources.datain, indent=2))
                     
                     # Find the Video Capture Device source
                     video_source = None
@@ -229,6 +254,11 @@ class OBSCapture:
                     print(f"Attempting to capture Video Capture Device with dimensions: {width}x{height}")
                     
                     try:
+                        # Check if we should still be running before taking screenshot
+                        if not self.running or self.stop_event.is_set():
+                            print("Capture stopped before taking screenshot")
+                            break
+                            
                         # First try GetSourceScreenshot
                         screenshot = self.ws.call(requests.GetSourceScreenshot(
                             sourceName='Video Capture Device',
@@ -316,7 +346,107 @@ class OBSCapture:
                 
                 last_capture_time = current_time
             
-            time.sleep(0.1)  # Small delay to prevent high CPU usage
+            # Check running flag more frequently
+            for _ in range(20):  # Check every 0.005 seconds for faster response
+                if not self.running or self.stop_event.is_set():
+                    break
+                time.sleep(0.005)
+        
+        print("Capture loop exited - self.running is now False")
+        
+        # Always trigger analysis when capture loop exits
+        if self.captured_files and not self.analysis_in_progress:
+            print("Capture loop exited - triggering analysis automatically")
+            self.analysis_in_progress = True
+            self.prepare_gpt4_analysis()
+            self.analysis_in_progress = False
+
+    def load_test_images(self, folder_path, max_images=10):
+        """Load test images from a folder for analysis"""
+        # Prevent repeated calls - check if we already have test images loaded
+        if hasattr(self, '_loading_test_images') and self._loading_test_images:
+            print("Test images already being loaded, skipping...")
+            return True
+        
+        # Check if we already have test images loaded from this folder
+        if (self.test_mode and self.unique_frames and 
+            any('test_image_' in os.path.basename(f) for f in self.unique_frames)):
+            print("Test images already loaded, skipping...")
+            return True
+        
+        self._loading_test_images = True
+        print(f"Loading test images from: {folder_path}")
+        self.test_mode = True
+        self.captured_files = []
+        self.unique_frames = []
+        self.frame_hashes = {}
+        self.duplicate_groups = defaultdict(list)
+        
+        # Supported image extensions
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        
+        # Get all image files from the folder
+        image_files = []
+        if os.path.exists(folder_path):
+            for file in os.listdir(folder_path):
+                if any(file.lower().endswith(ext) for ext in image_extensions):
+                    image_files.append(os.path.join(folder_path, file))
+        
+        # Sort files by name and limit to max_images
+        image_files.sort()
+        image_files = image_files[:max_images]
+        
+        if not image_files:
+            print(f"No image files found in {folder_path}")
+            return False
+        
+        print(f"Found {len(image_files)} image files")
+        
+        # Copy images to unique_frames directory for analysis
+        for i, image_path in enumerate(image_files):
+            try:
+                # Copy to unique_frames with a new name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                new_filename = os.path.join(self.unique_dir, f"test_image_{i+1}_{timestamp}.jpg")
+                
+                # Convert to JPEG if needed
+                img = Image.open(image_path)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img.save(new_filename, 'JPEG')
+                
+                self.unique_frames.append(new_filename)
+                self.captured_files.append(new_filename)
+                
+                print(f"Loaded test image: {os.path.basename(image_path)} -> {os.path.basename(new_filename)}")
+                
+            except Exception as e:
+                print(f"Error loading image {image_path}: {str(e)}")
+                continue
+        
+        print(f"Successfully loaded {len(self.unique_frames)} test images")
+        
+        # Trigger analysis automatically for test mode
+        if len(self.unique_frames) > 0 and not self.analysis_in_progress:
+            print("Triggering analysis for test images...")
+            self.analysis_in_progress = True
+            self.prepare_gpt4_analysis()
+            self.analysis_in_progress = False
+        
+        # Reset loading flag
+        self._loading_test_images = False
+        return len(self.unique_frames) > 0
+        
+        # Force thread termination
+        import threading
+        current_thread = threading.current_thread()
+        if current_thread.is_alive():
+            print(f"Thread {current_thread.name} is still alive after loop exit - forcing termination")
+            # Force the thread to exit by setting a flag that will be checked
+            self.running = False
+            self.stop_event.set()
+        else:
+            print(f"Thread {current_thread.name} terminated normally")
 
     def check_openai_quota(self):
         """Check OpenAI API quota and status"""
@@ -354,10 +484,11 @@ class OBSCapture:
 
     def prepare_gpt4_analysis(self):
         """Send unique frames to AI API for analysis"""
+        print("=== PREPARE_GPT4_ANALYSIS METHOD CALLED ===")
         if not self.unique_frames:
             print("No unique frames to analyze")
             return
-            
+
         # Read the prompt from file
         try:
             with open('prompt.txt', 'r', encoding='utf-8') as f:
@@ -366,13 +497,26 @@ class OBSCapture:
             print(f"Error reading prompt file: {str(e)}")
             return
 
+        # Apply coding language modifications
+        coding_language = getattr(st.session_state, 'coding_language', 'Both')
+        if coding_language == "Python":
+            prompt = prompt.replace("C++", "Python")
+        elif coding_language == "C++":
+            prompt = prompt.replace("Python", "C++")
+
         try:
             start_time = time.time()
             
             if self.use_gemini:
                 # Prepare images for Gemini
                 images = []
-                for frame_path in self.unique_frames:
+                useCapturedFrames = True
+                if useCapturedFrames:
+                    frame_list = self.captured_files
+                else:
+                    frame_list = self.unique_frames
+                
+                for frame_path in frame_list:
                     try:
                         if not os.path.exists(frame_path):
                             print(f"Warning: File not found: {frame_path}")
@@ -479,27 +623,37 @@ class OBSCapture:
 
     def stop_capture(self):
         """Stop capturing frames"""
+        print("=== STOP_CAPTURE METHOD CALLED ===")
         if not self.running:
             print("Capture is not running")
             return
             
         print("Stopping capture...")
         self.running = False
+        self.stop_event.set()  # Set the stop event to signal the thread to stop
         
-        # Update states immediately
-        if 'can_stop' in st.session_state:
-            st.session_state.can_stop = False
-            st.session_state.capturing = False
-            st.session_state.analysis_complete = True
-            st.session_state.can_start = True
+        # Force disconnect from OBS to interrupt any blocking calls
+        if self.ws:
+            try:
+                print("Disconnecting from OBS to interrupt blocking calls...")
+                self.ws.disconnect()
+            except Exception as e:
+                print(f"Error disconnecting from OBS: {str(e)}")
         
-        # Wait for capture thread to finish
-        if self.capture_thread and self.capture_thread.is_alive():
-            self.capture_thread.join(timeout=5.0)
-            if self.capture_thread.is_alive():
-                print("Warning: Capture thread did not stop gracefully")
-                # Force stop the thread if it's still running
-                self.capture_thread = None
+        # Don't wait for thread - just clear the reference immediately
+        if self.capture_thread:
+            print("Clearing capture thread reference...")
+            self.capture_thread = None
+        
+        # Force clear thread reference regardless
+        self.capture_thread = None
+        
+        # Ensure the thread is completely stopped
+        if hasattr(self, 'capture_thread') and self.capture_thread:
+            self.capture_thread = None
+            
+        # Force clear the running flag
+        self.running = False
         
         if self.ws:
             try:
@@ -537,11 +691,16 @@ class OBSCapture:
             for filename in self.unique_frames:
                 print(f"- {filename}")
                 
-            # Prepare GPT-4 analysis
-            if not self.analysis_in_progress:
+            # Prepare GPT-4 analysis (only if not already triggered by capture loop)
+            print(f"Preparing analysis with {len(self.unique_frames)} unique frames...")
+            if not self.analysis_in_progress and self.captured_files:
                 self.analysis_in_progress = True
+                print("Starting GPT-4 analysis from stop_capture method...")
                 self.prepare_gpt4_analysis()
                 self.analysis_in_progress = False
+                print("Analysis preparation completed")
+            else:
+                print("Analysis already in progress or no frames captured, skipping...")
         else:
             print("\nNo frames were captured during this session.")
             
@@ -600,6 +759,8 @@ def run_streamlit():
         st.session_state.can_stop = False
     if 'running' not in st.session_state:
         st.session_state.running = False
+    if 'coding_language' not in st.session_state:
+        st.session_state.coding_language = 'Both'
     
     # Function to update button states
     def update_button_states():
@@ -618,21 +779,131 @@ def run_streamlit():
     # Create the capture instance if not exists
     if st.session_state.capture is None:
         st.session_state.capture = OBSCapture(use_gemini=True)
+    else:
+        # Clean up any orphaned threads on app restart
+        if (st.session_state.capture.capture_thread and 
+            st.session_state.capture.capture_thread.is_alive() and 
+            not st.session_state.capturing):
+            print("Cleaning up orphaned capture thread...")
+            st.session_state.capture.capture_thread = None
+            st.session_state.capture.running = False
     
     # Add API selection in sidebar
     with st.sidebar:
         st.header("API Settings")
         use_gemini = st.checkbox("Use Gemini API instead of OpenAI", value=True)
         
-        if st.session_state.capture is None or st.session_state.capture.use_gemini != use_gemini:
+        # Only create new instance if it doesn't exist or if API type actually changed
+        if st.session_state.capture is None:
             st.session_state.capture = OBSCapture(use_gemini=use_gemini)
+        elif st.session_state.capture.use_gemini != use_gemini:
+            # Only recreate if API type actually changed
+            print(f"Switching from {'Gemini' if st.session_state.capture.use_gemini else 'OpenAI'} to {'Gemini' if use_gemini else 'OpenAI'}")
+            st.session_state.capture = OBSCapture(use_gemini=use_gemini)
+    
+    # Add coding language selection
+    with st.sidebar:
+        st.header("Coding Language")
+        coding_language = st.selectbox(
+            "Select the programming language for analysis:",
+            ["Python", "C++", "Both"],
+            help="Choose the programming language(s) to focus on during the interview analysis"
+        )
+        
+        # Store the selected language in session state
+        st.session_state.coding_language = coding_language
+    
+    # Add test mode section
+    with st.sidebar:
+        st.header("Test Mode")
+        test_mode = st.checkbox("Enable Test Mode", help="Use test images instead of live capture")
+        
+        if test_mode:
+            st.info("Test mode enabled - will use images from folder instead of live capture")
+            
+            # Test image folder selection
+            # set default C:\projectalpha\captured_frames
+            test_folder = st.text_input(
+                "Test Images Folder Path:", 
+                value="C:\projectalpha\captured_frames",
+                help="Path to folder containing test images"
+            )
+            
+            # Number of images to use
+            max_test_images = st.slider(
+                "Number of Images to Use:", 
+                min_value=1, 
+                max_value=20, 
+                value=5,
+                help="Maximum number of images to load from the folder"
+            )
+            
+            # Load test images button
+            if 'test_images_loaded' not in st.session_state:
+                st.session_state.test_images_loaded = False
+            if 'test_images_folder' not in st.session_state:
+                st.session_state.test_images_folder = ""
+            
+            # Check if we've already loaded images from this folder
+            already_loaded = (st.session_state.test_images_loaded and 
+                            st.session_state.test_images_folder == test_folder)
+            
+            if st.button("Load Test Images", disabled=already_loaded):
+                if st.session_state.capture:
+                    with st.spinner("Loading test images and starting analysis..."):
+                        success = st.session_state.capture.load_test_images(test_folder, max_test_images)
+                        if success:
+                            st.session_state.test_images_loaded = True
+                            st.session_state.test_images_folder = test_folder
+                            st.success(f"Loaded {len(st.session_state.capture.unique_frames)} test images and started analysis!")
+                            st.session_state.capturing = False
+                            st.session_state.analysis_complete = False
+                            st.session_state.can_start = True
+                            st.session_state.can_stop = False
+                            # Don't rerun here - let the analysis complete naturally
+                        else:
+                            st.error("Failed to load test images. Check the folder path.")
+            
+            # Show loaded test images
+            if st.session_state.capture and st.session_state.capture.unique_frames:
+                st.write(f"**Loaded {len(st.session_state.capture.unique_frames)} test images:**")
+                for i, frame_path in enumerate(st.session_state.capture.unique_frames):
+                    st.write(f"{i+1}. {os.path.basename(frame_path)}")
+                
+                # Analyze test images button
+                if st.button("Analyze Test Images"):
+                    if st.session_state.capture and not st.session_state.capture.analysis_in_progress:
+                        st.session_state.capture.analysis_in_progress = True
+                        st.session_state.capture.prepare_gpt4_analysis()
+                        st.session_state.capture.analysis_in_progress = False
+                        st.success("Analysis started!")
+                        st.rerun()
+                
+                # Reset button to allow loading new test images
+                if st.button("Reset Test Images"):
+                    st.session_state.test_images_loaded = False
+                    st.session_state.test_images_folder = ""
+                    if st.session_state.capture:
+                        st.session_state.capture.captured_files = []
+                        st.session_state.capture.unique_frames = []
+                        st.session_state.capture.test_mode = False
+                        st.session_state.capture._loading_test_images = False
+                    st.success("Test images reset. You can load new images now.")
+                    st.rerun()
+        else:
+            # Clear test mode data when disabled
+            if st.session_state.capture and st.session_state.capture.test_mode:
+                st.session_state.capture.test_mode = False
+                st.session_state.capture.captured_files = []
+                st.session_state.capture.unique_frames = []
+                st.info("Test mode disabled - cleared test images")
     
     # Add connection form
     with st.sidebar:
         st.header("OBS Connection Settings")
-        host = st.text_input("Host", value="192.168.1.2")
-        port = st.number_input("Port", value=4455)
-        password = st.text_input("Password", value="fNUnY0vismaURiWU", type="password")
+        host = st.text_input("Host", value=(os.getenv("OBS_HOST") or "192.168.1.7"))
+        port = st.number_input("Port", value=(os.getenv("OBS_PORT") or 4455))
+        password = st.text_input("Password", value=(os.getenv("OBS_PASSWORD") or "fNUnY0vismaURiWU"), type="password")
         
         if st.button("Connect to OBS"):
             if st.session_state.capture.connect(host, port, password):
@@ -643,7 +914,38 @@ def run_streamlit():
                 st.error("Failed to connect to OBS")
     
     # Create columns for start/stop buttons
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
+    
+    # Add status indicator
+    thread_running = (st.session_state.capture and 
+                     st.session_state.capture.capture_thread and 
+                     st.session_state.capture.capture_thread.is_alive())
+    
+    analysis_in_progress = (st.session_state.capture and 
+                           st.session_state.capture.analysis_in_progress)
+    
+    if analysis_in_progress:
+        st.info("🔄 Analysis in progress...")
+    elif st.session_state.capturing and thread_running:
+        st.success("🟢 Capture is running...")
+    elif st.session_state.capturing and not thread_running:
+        st.warning("🟡 Capture should be running but thread is not alive")
+    elif not st.session_state.capturing and thread_running:
+        st.error("🔴 Capture should be stopped but thread is still alive!")
+    else:
+        st.info("⚪ Capture is stopped")
+    
+    # Debug information
+    if st.session_state.capture:
+        with st.expander("Debug Info"):
+            st.write(f"Session capturing: {st.session_state.capturing}")
+            st.write(f"Session running: {st.session_state.running}")
+            st.write(f"Capture running: {st.session_state.capture.running}")
+            st.write(f"Stop event set: {st.session_state.capture.stop_event.is_set()}")
+            st.write(f"Thread exists: {st.session_state.capture.capture_thread is not None}")
+            if st.session_state.capture.capture_thread:
+                st.write(f"Thread alive: {st.session_state.capture.capture_thread.is_alive()}")
+            st.write(f"OBS connected: {st.session_state.capture.ws is not None}")
     
     # Start capture button
     with col1:
@@ -652,10 +954,16 @@ def run_streamlit():
             start_tooltip = "Start a new capture session. Previous analysis will be cleared."
         elif not st.session_state.connected:
             start_tooltip = "Please connect to OBS first before starting capture."
+        
+        # Disable in test mode
+        button_disabled = not st.session_state.can_start or test_mode
             
         if st.button("Start Capture", 
-                    disabled=not st.session_state.can_start,
-                    help=start_tooltip):
+                    disabled=button_disabled,
+                    help=start_tooltip if not test_mode else "Disabled in test mode"):
+            if test_mode:
+                st.warning("Live capture is disabled in test mode. Use 'Load Test Images' instead.")
+                return
             if not st.session_state.connected:
                 st.error("Please connect to OBS first!")
                 return
@@ -673,22 +981,71 @@ def run_streamlit():
         stop_tooltip = "Stop capturing frames and start analysis"
         if not st.session_state.capturing:
             stop_tooltip = "Capture must be running to stop"
+        
+        # Disable in test mode
+        stop_button_disabled = not st.session_state.can_stop or st.session_state.analysis_complete or test_mode
             
         if st.button("Stop Capture", 
-                    disabled=not st.session_state.can_stop or st.session_state.analysis_complete,
-                    help=stop_tooltip):
+                    disabled=stop_button_disabled,
+                    help=stop_tooltip if not test_mode else "Disabled in test mode"):
             if st.session_state.capture:
-                # Disable stop button immediately
+                # Stop capture first - this will set the running flag to False
+                st.session_state.capture.stop_capture()
+                
+                # Update session state after stopping
                 st.session_state.can_stop = False
                 st.session_state.capturing = False
                 st.session_state.analysis_complete = True
                 st.session_state.running = False
                 st.session_state.can_start = True
                 
-                # Stop capture and start analysis
-                st.session_state.capture.stop_capture()
                 st.success("Capture stopped and analysis complete!")
                 st.rerun()  # Force a rerun to update button states
+    
+    # Force stop button (emergency stop)
+    with col3:
+        if st.button("🛑 Force Stop", 
+                    help="Emergency stop - forcefully terminates capture if normal stop doesn't work"):
+            if st.session_state.capture:
+                print("Force stopping capture...")
+                # Disconnect from OBS immediately
+                if st.session_state.capture.ws:
+                    try:
+                        st.session_state.capture.ws.disconnect()
+                    except:
+                        pass
+                
+                # Set all stop flags
+                st.session_state.capture.running = False
+                st.session_state.capture.stop_event.set()
+                
+                # Force clear the thread - this is the key fix
+                if st.session_state.capture.capture_thread:
+                    print("Force clearing capture thread...")
+                    st.session_state.capture.capture_thread = None
+                
+                # Update session state
+                st.session_state.capturing = False
+                st.session_state.analysis_complete = True
+                st.session_state.can_start = True
+                st.session_state.can_stop = False
+                st.session_state.running = False
+                
+                st.error("Capture force stopped!")
+                st.rerun()
+    
+    # Kill thread button (for persistent threads)
+    if (st.session_state.capture and 
+        st.session_state.capture.capture_thread and 
+        st.session_state.capture.capture_thread.is_alive() and 
+        not st.session_state.capturing):
+        if st.button("💀 Kill Orphaned Thread", 
+                    help="Kill a thread that's still running even though capture should be stopped"):
+            print("Killing orphaned capture thread...")
+            st.session_state.capture.capture_thread = None
+            st.session_state.capture.running = False
+            st.success("Orphaned thread killed!")
+            st.rerun()
     
     # Create containers for analysis and images
     analysis_container = st.container()
@@ -696,51 +1053,49 @@ def run_streamlit():
     
     # Monitor the analysis queue and display frames
     try:
-        while True:
-            try:
-                queue_item = st.session_state.capture.analysis_queue.get_nowait()
-                if isinstance(queue_item, dict):
-                    # Handle state updates from the queue
-                    if 'state_update' in queue_item:
-                        for key, value in queue_item['state_update'].items():
-                            st.session_state[key] = value
-                        st.session_state.analysis_complete = True
-                        st.session_state.can_stop = False  # Ensure stop button is disabled
-                        st.session_state.can_start = True  # Ensure start button is enabled
-                    
-                    # Handle content
-                    if queue_item['type'] == 'analysis':
-                        st.session_state.analysis = queue_item['content']
-                    elif queue_item['type'] == 'error':
-                        st.error(queue_item['content'])
-                else:
-                    # Handle legacy string messages
-                    st.session_state.analysis = queue_item
+        # Check for new analysis results
+        try:
+            queue_item = st.session_state.capture.analysis_queue.get_nowait()
+            if isinstance(queue_item, dict):
+                # Handle state updates from the queue
+                if 'state_update' in queue_item:
+                    for key, value in queue_item['state_update'].items():
+                        st.session_state[key] = value
                     st.session_state.analysis_complete = True
                     st.session_state.can_stop = False  # Ensure stop button is disabled
                     st.session_state.can_start = True  # Ensure start button is enabled
                 
-                with analysis_container:
-                    if st.session_state.analysis:
-                        st.markdown("## Analysis")
-                        st.markdown(st.session_state.analysis)
-            except queue.Empty:
-                pass
-            
-            # Display captured frames
-            if st.session_state.capture.unique_frames:
-                with images_container:
-                    st.markdown("## Captured Frames")
-                    cols = st.columns(min(3, len(st.session_state.capture.unique_frames)))
-                    for i, frame_path in enumerate(st.session_state.capture.unique_frames):
-                        with cols[i % 3]:
-                            st.image(frame_path, caption=f"Frame {i+1}")
-            
-            # Add a small delay to prevent high CPU usage
-            time.sleep(0.1)
+                # Handle content
+                if queue_item['type'] == 'analysis':
+                    st.session_state.analysis = queue_item['content']
+                elif queue_item['type'] == 'error':
+                    st.error(queue_item['content'])
+            else:
+                # Handle legacy string messages
+                st.session_state.analysis = queue_item
+                st.session_state.analysis_complete = True
+                st.session_state.can_stop = False  # Ensure stop button is disabled
+                st.session_state.can_start = True  # Ensure start button is enabled
+        except queue.Empty:
+            pass
+        
+        # Display analysis results
+        with analysis_container:
+            if st.session_state.analysis:
+                st.markdown("## Analysis")
+                st.markdown(st.session_state.analysis)
+        
+        # Display captured frames (only once, not in a loop)
+        if st.session_state.capture and st.session_state.capture.unique_frames:
+            with images_container:
+                st.markdown("## Captured Frames")
+                cols = st.columns(min(3, len(st.session_state.capture.unique_frames)))
+                for i, frame_path in enumerate(st.session_state.capture.unique_frames):
+                    with cols[i % 3]:
+                        st.image(frame_path, caption=f"Frame {i+1}")
             
     except Exception as e:
-        st.error(f"Error in display loop: {str(e)}")
+        st.error(f"Error in display: {str(e)}")
         st.session_state.analysis_complete = True
         update_button_states()
     
